@@ -12,40 +12,17 @@ import {
   getDocs,
   doc,
   getDoc,
-  addDoc,
   setDoc,
   updateDoc,
   onSnapshot,
   query,
   where,
-  runTransaction,
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+const API_BASE_URL = window.MOVIENEST_API_URL || "http://127.0.0.1:8000";
 
 let currentUser = null;
 let currentViewData = {};
 let currentAuthMode = "login";
-
-// Track Auth State Changes
-// Track Auth State Changes
-onAuthStateChanged(auth, (user) => {
-  currentUser = user;
-  updateNavAuthUI();
-
-  if (currentUser) {
-    router("home");
-  } else {
-    // Show a clean welcome/landing state behind the modal, then trigger login
-    const appView = document.getElementById("app-view");
-    appView.innerHTML = `
-      <div class="text-center py-20">
-        <h1 class="text-4xl font-extrabold mb-4">Welcome to MovieNest</h1>
-        <p class="text-slate-400 mb-8">Please sign in to browse and book movie tickets.</p>
-        <button onclick="openAuthModal('login')" class="bg-rose-600 hover:bg-rose-700 text-white px-6 py-3 rounded-xl font-bold transition shadow-lg shadow-rose-600/20">Get Started</button>
-      </div>
-    `;
-    openAuthModal("login");
-  }
-});
 
 window.updateNavAuthUI = function () {
   const container = document.getElementById("auth-nav-container");
@@ -201,8 +178,6 @@ function renderSeatSelection(data) {
     let bookedSeats = [];
     if (docSnap.exists()) {
       bookedSeats = docSnap.data().bookedSeats || [];
-    } else {
-      await setDoc(seatDocRef, { bookedSeats: [] });
     }
 
     const seatGrid = document.getElementById("seat-grid");
@@ -254,16 +229,35 @@ window.initiateRazorpayPayment = async function (movie, timeSlot) {
   }
 
   const seatIds = Array.from(selected).map((el) => el.innerText);
-  const amount = selected.length * 200 * 100;
 
-  var options = {
-    key: "rzp_test_TJ0KhAbQ3ZjQYG",
-    amount: amount,
-    currency: "INR",
+  let order;
+  try {
+    const token = await currentUser.getIdToken();
+    const response = await fetch(`${API_BASE_URL}/api/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ movie_id: movieId, time_slot: timeSlot, seats: seatIds }),
+    });
+    if (!response.ok) throw new Error((await response.json()).detail || "Unable to start payment.");
+    order = await response.json();
+  } catch (err) {
+    console.error("Unable to create payment order:", err);
+    alert(err.message || "Unable to start payment. Please try again.");
+    return;
+  }
+
+  const options = {
+    key: order.keyId,
+    order_id: order.orderId,
+    amount: order.amount,
+    currency: order.currency,
     name: "MovieNest",
     description: "Movie Ticket Booking",
     handler: async function (response) {
-      const seatDocRef = doc(db, "showSeats", `${movie.id}_${timeSlot}`);
+      const seatDocRef = doc(db, "showSeats", `${movieId}_${timeSlot}`);
 
       try {
         await runTransaction(db, async (transaction) => {
@@ -274,7 +268,9 @@ window.initiateRazorpayPayment = async function (movie, timeSlot) {
 
           for (let seat of seatIds) {
             if (currentBooked.includes(seat)) {
-              throw new Error(`Seat ${seat} was just booked by someone else.`);
+              throw new Error(
+                `Seat ${seat} was just booked by someone else. Please choose another seat.`,
+              );
             }
           }
 
@@ -286,19 +282,13 @@ window.initiateRazorpayPayment = async function (movie, timeSlot) {
         });
 
         const bookingData = {
-          userId: currentUser.uid,
           userEmail: currentUser.email,
-          movieId: movie.id,
-          movieTitle: movie.title,
-          posterUrl: movie.posterUrl,
+          movieId: movieId,
           timeSlot: timeSlot,
           seats: seatIds,
-          amount: amount / 100,
+          amount: confirmation.amount,
           paymentId: response.razorpay_payment_id,
-          createdAt: new Date(),
         };
-
-        await addDoc(collection(db, "bookings"), bookingData);
 
         // Generate and download PDF ticket automatically with poster
         await generateTicketPDF(bookingData);
@@ -575,29 +565,3 @@ window.handleGoogleSignIn = async function () {
     alert("Google Sign-In Failed: " + err.message);
   }
 };
-
-// Theme Switcher Logic
-window.toggleTheme = function () {
-  const body = document.body;
-  const btn = document.getElementById("theme-toggle-btn");
-
-  body.classList.toggle("light-theme");
-  const isLight = body.classList.contains("light-theme");
-
-  // Save preference
-  localStorage.setItem("app-theme", isLight ? "light" : "dark");
-
-  if (btn) {
-    btn.innerText = isLight ? "☀️ Light Mode" : "🌙 Dark Mode";
-  }
-};
-
-// Initialize Theme Preference on Load
-(function initTheme() {
-  const savedTheme = localStorage.getItem("app-theme");
-  if (savedTheme === "light") {
-    document.body.classList.add("light-theme");
-    const btn = document.getElementById("theme-toggle-btn");
-    if (btn) btn.innerText = "☀️ Light Mode";
-  }
-})();
