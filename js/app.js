@@ -548,7 +548,39 @@ function renderSeatSelection(data) {
         </p>
       </div>
 
-      <div id="seat-grid" class="seat-grid"></div>
+      <div class="flex flex-wrap items-center justify-center gap-3 mb-5">
+  <label for="recommend-seat-count" class="text-sm text-slate-300">
+    Number of seats
+  </label>
+
+  <select
+    id="recommend-seat-count"
+    class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white"
+  >
+    <option value="1">1 seat</option>
+    <option value="2" selected>2 seats</option>
+    <option value="3">3 seats</option>
+    <option value="4">4 seats</option>
+    <option value="5">5 seats</option>
+    <option value="6">6 seats</option>
+    <option value="7">7 seats</option>
+    <option value="8">8 seats</option>
+    <option value="9">9 seats</option>
+    <option value="10">10 seats</option>
+  </select>
+
+  <button
+    id="recommend-seats-btn"
+    type="button"
+    class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2 rounded-lg"
+  >
+    Recommend Best Seats
+  </button>
+</div>
+
+<p id="recommendation-message" class="text-sm text-center text-emerald-400 mb-4"></p>
+
+<div id="seat-grid" class="seat-grid"></div>
 
       <div
         class="flex justify-center gap-6 mb-6 text-xs text-slate-400 flex-wrap"
@@ -608,6 +640,9 @@ function renderSeatSelection(data) {
 
   document.getElementById("proceed-payment-btn").onclick = () => {
     initiateRazorpayPayment(data.movie, data.timeSlot);
+  };
+  document.getElementById("recommend-seats-btn").onclick = () => {
+    recommendBestSeats(data);
   };
 
   const seatDocRef = doc(db, "showSeats", `${data.movie.id}_${data.timeSlot}`);
@@ -694,6 +729,141 @@ function getCurrentLockedSeats() {
   }
 
   return {};
+}
+
+/* ============================================================
+   BEST-SEAT RECOMMENDATION
+   ============================================================ */
+
+function getSeatGroupScore(row, startSeat, count) {
+  const rowIndex = "ABCDEFGH".indexOf(row);
+  const centerSeat = (startSeat + count - 1) / 2;
+
+  // Prefer the middle-to-back rows.
+  const rowPenalty = Math.abs(rowIndex - 5.5);
+
+  // Prefer groups centered horizontally.
+  const centerPenalty = Math.abs(centerSeat - 5.5);
+
+  // Prefer adjacent seats rather than separated seats.
+  return rowPenalty * 2 + centerPenalty * 3;
+}
+
+async function recommendBestSeats(data) {
+  const message = document.getElementById("recommendation-message");
+  const button = document.getElementById("recommend-seats-btn");
+  const countSelect = document.getElementById("recommend-seat-count");
+
+  if (!currentUser || !message || !button || !countSelect) return;
+
+  const count = Number(countSelect.value);
+
+  if (!Number.isInteger(count) || count < 1 || count > 10) {
+    showCustomPopup("Choose between 1 and 10 seats.", "error");
+    return;
+  }
+
+  button.disabled = true;
+  message.textContent = "Finding the best available seats...";
+
+  try {
+    const rows = ["A", "B", "C", "D", "E", "F", "G", "H"];
+    const bookedSeats = currentViewData.bookedSeats || [];
+    const locks = getCurrentLockedSeats();
+    const candidates = [];
+
+    for (const row of rows) {
+      for (let start = 1; start <= 11 - count; start++) {
+        const group = Array.from(
+          { length: count },
+          (_, index) => `${row}${start + index}`,
+        );
+
+        const available = group.every((seatId) => {
+          if (bookedSeats.includes(seatId)) return false;
+
+          const lock = locks[seatId];
+
+          if (!lock) return true;
+
+          return (
+            lock.userId === currentUser.uid &&
+            lock.status === "locked" &&
+            Number(lock.expiresAt) > Date.now()
+          );
+        });
+
+        if (!available) continue;
+
+        candidates.push({
+          seats: group,
+          score: getSeatGroupScore(row, start, count),
+        });
+      }
+    }
+
+    candidates.sort((a, b) => a.score - b.score);
+
+    if (candidates.length === 0) {
+      message.textContent = "";
+      showCustomPopup(
+        "No suitable group of adjacent seats is available.",
+        "info",
+      );
+      return;
+    }
+
+    const bestGroup = candidates[0].seats;
+
+    // Release current selections so the recommendation becomes
+    // the user's complete new selection.
+    for (const seatId of Array.from(selectedSeatIds)) {
+      await unlockSeat(data.movie.id, data.timeSlot, seatId);
+    }
+
+    // Lock every recommended seat through the existing
+    // transaction-based locking function.
+    const lockedSeats = [];
+
+    try {
+      for (const seatId of bestGroup) {
+        await lockSeat(data.movie.id, data.timeSlot, seatId);
+        selectedSeatIds.add(seatId);
+        lockedSeats.push(seatId);
+      }
+    } catch (error) {
+      for (const seatId of lockedSeats) {
+        try {
+          await unlockSeat(data.movie.id, data.timeSlot, seatId);
+        } catch (unlockError) {
+          console.warn("Could not release recommended seat:", unlockError);
+        }
+      }
+
+      throw error;
+    }
+
+    updateBookingSummary();
+
+    renderSeatButtons(
+      data,
+      currentViewData.bookedSeats || [],
+      getCurrentLockedSeats(),
+    );
+
+    message.textContent = `Recommended seats: ${bestGroup.join(", ")}`;
+  } catch (error) {
+    console.error("Best-seat recommendation failed:", error);
+
+    message.textContent = "";
+
+    showCustomPopup(
+      getErrorMessage(error, "Unable to recommend seats. Please try again."),
+      "error",
+    );
+  } finally {
+    button.disabled = false;
+  }
 }
 /* ============================================================
    RENDER SEAT BUTTONS
