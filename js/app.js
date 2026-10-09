@@ -737,16 +737,18 @@ function getCurrentLockedSeats() {
 
 function getSeatGroupScore(row, startSeat, count) {
   const rowIndex = "ABCDEFGH".indexOf(row);
+
+  // Calculate the center of the selected group of seats.
   const centerSeat = (startSeat + count - 1) / 2;
 
-  // Prefer the middle-to-back rows.
-  const rowPenalty = Math.abs(rowIndex - 5.5);
-
-  // Prefer groups centered horizontally.
+  // Lower score means a better recommendation.
+  // Center seats have the highest priority.
   const centerPenalty = Math.abs(centerSeat - 5.5);
 
-  // Prefer adjacent seats rather than separated seats.
-  return rowPenalty * 2 + centerPenalty * 3;
+  // Prefer back rows when center-seat availability is equal.
+  const rowPenalty = Math.abs(rowIndex - 5.5);
+
+  return centerPenalty * 100 + rowPenalty;
 }
 
 async function recommendBestSeats(data) {
@@ -773,6 +775,8 @@ async function recommendBestSeats(data) {
     const candidates = [];
 
     for (const row of rows) {
+      const rowIndex = rows.indexOf(row);
+
       for (let start = 1; start <= 11 - count; start++) {
         const group = Array.from(
           { length: count },
@@ -795,15 +799,29 @@ async function recommendBestSeats(data) {
 
         if (!available) continue;
 
+        const centerSeat = start + (count - 1) / 2;
+
         candidates.push({
           seats: group,
-          score: getSeatGroupScore(row, start, count),
+          row,
+          start,
+          centerDistance: Math.abs(centerSeat - 5.5),
+          rowDistance: Math.abs(rowIndex - 5.5),
         });
       }
     }
 
-    candidates.sort((a, b) => a.score - b.score);
+    candidates.sort((a, b) => {
+      // FIRST: Choose the group closest to the horizontal center.
+      const centerDifference = a.centerDistance - b.centerDistance;
 
+      if (centerDifference !== 0) {
+        return centerDifference;
+      }
+
+      // SECOND: Prefer back rows when center distance is equal.
+      return a.rowDistance - b.rowDistance;
+    });
     if (candidates.length === 0) {
       message.textContent = "";
       showCustomPopup(
